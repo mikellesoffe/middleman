@@ -109,29 +109,62 @@ const SCHEMA = {
   }
 };
 
-export async function analyzeWithAI({ from, subject, text }) {
-  const input = `From: ${from}\nSubject: ${subject}\n\n${text}`.trim();
+import OpenAI from "openai";
 
-  const resp = await client.responses.create({
-    model: MODEL,
-    reasoning: { effort: "low" },
-    instructions: [
-      "You are a communication firewall for high-conflict co-parenting.",
-      "Return ONLY JSON matching the schema.",
-      "Do not quote insults or abusive language.",
-      "Extract only logistics and decisions.",
-      "If response is required, set responseNeeded true.",
-      "Provide two one-sentence replies if responseNeeded is true."
-    ].join("\n"),
-    input,
-    text: {
-      format: {
-        type: "json_schema",
-        json_schema: SCHEMA,
-        strict: true
-      }
-    }
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+
+export async function analyzeWithAI({ from, subject, text }) {
+  const model = process.env.OPENAI_MODEL || "gpt-5";
+
+  const systemPrompt = `
+You summarize co-parenting emails.
+Remove manipulation or insults.
+Extract only logistics and required actions.
+Return STRICT JSON only with this shape:
+{
+  "summary": string,
+  "responseNeeded": boolean,
+  "neededToKnow": string[],
+  "replyOptions": { "boundary": string, "cooperative": string },
+  "flags": string[]
+}
+`;
+
+  const userPrompt = `
+From: ${from}
+Subject: ${subject}
+
+${text}
+`;
+
+  const response = await client.chat.completions.create({
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ],
+    temperature: 0.2
   });
+
+  const raw = response.choices[0].message.content;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {
+      summary: raw,
+      responseNeeded: true,
+      neededToKnow: [],
+      replyOptions: {
+        boundary: "Noted.",
+        cooperative: "Thanks for the update."
+      },
+      flags: ["non_json_output"]
+    };
+  }
+}
 
   return JSON.parse(resp.output_text);
 }
