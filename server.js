@@ -9,6 +9,8 @@ import { analyzeWithAI } from "./aiAnalyzer.js";
 const app = express();
 app.use(helmet());
 app.use(morgan("combined"));
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 const upload = multer();
 
@@ -29,9 +31,10 @@ const messages = [];
 // const pushClient = makePushClient();
 
 app.post("/email/inbound", basicAuth, upload.any(), async (req, res) => {
-  const from = req.body.from || "";
-  const subject = req.body.subject || "";
-  const text = req.body.text || "";
+  const body = req.body || {};
+const from = body.from || "";
+const subject = body.subject || "";
+const text = body.text || "";
 
   if (!text) return res.status(400).json({ ok: false });
 
