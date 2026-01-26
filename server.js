@@ -31,30 +31,33 @@ const messages = [];
 // const pushClient = makePushClient();
 
 app.post("/email/inbound", basicAuth, upload.any(), async (req, res) => {
-  const body = req.body || {};
-const from = body.from || "";
-const subject = body.subject || "";
-const text = body.text || "";
+  try {
+    const body = req.body || {};
+    const from = body.from || "";
+    const subject = body.subject || "";
+    const text = body.text || "";
 
-  if (!text) return res.status(400).json({ ok: false });
+    if (!text) {
+      return res.status(400).json({ ok: false, error: "Missing text body" });
+    }
 
-  const parsed = await analyzeWithAI({ from, subject, text });
+    const parsed = await analyzeWithAI({ from, subject, text });
 
-  const msg = {
-    id: crypto.randomUUID(),
-    channel: "email",
-    receivedAt: new Date().toISOString(),
-    ...parsed
-  };
+    const msg = {
+      id: crypto.randomUUID(),
+      channel: "email",
+      receivedAt: new Date().toISOString(),
+      ...parsed
+    };
 
-  messages.unshift(msg);
+    messages.unshift(msg);
 
-  // await sendPushSafe(
-  //   pushClient,
-  //   msg.flags?.length ? "Message received (filtered)" : "New message received"
-  // );
-
-  res.json({ ok: true });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ /email/inbound error:", err?.stack || err);
+    // IMPORTANT: return JSON so we don't crash and Render doesn't 502
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
 });
 
 app.get("/messages", (req, res) => {
