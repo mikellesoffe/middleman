@@ -4,7 +4,7 @@ import morgan from "morgan";
 import multer from "multer";
 import crypto from "crypto";
 import { analyzeWithAI } from "./aiAnalyzer.js";
-import { makePushClient, sendPushSafe } from "./sendPush.js";
+// import { makePushClient, sendPushSafe } from "./sendPush.js";
 
 const app = express();
 app.use(helmet());
@@ -26,7 +26,7 @@ function basicAuth(req, res, next) {
 }
 
 const messages = [];
-const pushClient = makePushClient();
+// const pushClient = makePushClient();
 
 app.post("/email/inbound", basicAuth, upload.any(), async (req, res) => {
   const from = req.body.from || "";
@@ -46,10 +46,10 @@ app.post("/email/inbound", basicAuth, upload.any(), async (req, res) => {
 
   messages.unshift(msg);
 
-  await sendPushSafe(
-    pushClient,
-    msg.flags?.length ? "Message received (filtered)" : "New message received"
-  );
+  // await sendPushSafe(
+  //   pushClient,
+  //   msg.flags?.length ? "Message received (filtered)" : "New message received"
+  // );
 
   res.json({ ok: true });
 });
