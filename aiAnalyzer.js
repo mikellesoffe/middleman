@@ -78,7 +78,6 @@ ${text}
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt }
     ],
-    temperature: 0.2
   });
 
   const raw = response?.choices?.[0]?.message?.content || "";
