@@ -2,7 +2,18 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 import crypto from "crypto";
+import nodemailer from "nodemailer";
 import { analyzeWithAI } from "./aiAnalyzer.js";
+
+const GMAIL_USER = process.env.GMAIL_USER;
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+const REPLY_FROM_NAME = process.env.REPLY_FROM_NAME || "MiddleMan";
+
+// IMPORTANT: only allow replying to known addresses (prevents abuse)
+const ALLOWED_RECIPIENTS = new Set([
+  "jeremybnewman@gmail.com",
+  "jklinenewman@gmail.com"
+]);
 
 const app = express();
 
@@ -13,6 +24,15 @@ app.use(morgan("combined"));
 // IMPORTANT: Apps Script sends JSON, so we must parse it
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// ===== Mail Transporter (Nodemailer) =====
+const mailer =
+  (GMAIL_USER && GMAIL_APP_PASSWORD)
+    ? nodemailer.createTransport({
+        service: "gmail",
+        auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD }
+      })
+    : null;
 
 // ===== In-memory store (MVP) =====
 const messages = [];
@@ -48,6 +68,14 @@ function basicAuth(req, res, next) {
 }
 
 // ===== Helpers =====
+function extractEmail(str = "") {
+  const m = str.match(/<([^>]+)>/);
+  if (m && m[1]) return m[1].trim();
+  // fallback: first email-like token
+  const m2 = str.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return m2 ? m2[0] : str.trim();
+}
+
 function normalizeParsed(parsed) {
   // Ensure the object always has the fields your app expects
   const safe = {
@@ -157,6 +185,45 @@ app.post("/email/inbound", basicAuth, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
+
+// Nodemailer
+app.post("/reply", basicAuth, express.json(), async (req, res) => {
+  try {
+    if (!mailer) {
+      return res.status(500).json({ ok: false, error: "Email not configured" });
+    }
+
+    const { messageId, body } = req.body || {};
+    if (!messageId || !body) {
+      return res.status(400).json({ ok: false, error: "Missing messageId or body" });
+    }
+
+    const msg = messages.find(m => m.id === messageId); // adapt if your storage differs
+    if (!msg) {
+      return res.status(404).json({ ok: false, error: "Message not found" });
+    }
+
+    const to = msg.fromEmail || extractEmail(msg.fromRaw || msg.from || "");
+    if (!to || !ALLOWED_RECIPIENTS.has(to)) {
+      return res.status(403).json({ ok: false, error: "Recipient not allowed" });
+    }
+
+    const subject = msg.subject ? `Re: ${msg.subject}` : "Re:";
+
+    await mailer.sendMail({
+      from: `${REPLY_FROM_NAME} <${GMAIL_USER}>`,
+      to,
+      subject,
+      text: body
+    });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ /reply error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
+
 
 // ===== Start =====
 const PORT = process.env.PORT || 10000;
