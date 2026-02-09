@@ -146,6 +146,10 @@ app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/", (req, res) => {
+  res.status(200).send("MiddleMan server is running ✅");
+});
+
 // The app polls this (now DB-backed)
 app.get("/messages", basicAuth, async (req, res) => {
   try {
