@@ -22,7 +22,8 @@ const INBOUND_PASS = process.env.INBOUND_PASS || "";
 // only allow sending to these addresses (safety)
 const ALLOWED_RECIPIENTS = new Set([
   "jeremybnewman@gmail.com",
-  "jklinenewman@gmail.com"
+  "jklinenewman@gmail.com",
+  "mikellesoffe@gmail.com"
 ]);
 
 if (SENDGRID_API_KEY) {
