@@ -5,6 +5,9 @@ import crypto from "crypto";
 import nodemailer from "nodemailer";
 import { analyzeWithAI } from "./aiAnalyzer.js";
 
+// ✅ DB helpers (make sure db.js exists and exports these)
+import { pool, initDb, insertMessage, listMessages } from "./db.js";
+
 const GMAIL_USER = process.env.GMAIL_USER;
 const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
 const REPLY_FROM_NAME = process.env.REPLY_FROM_NAME || "MiddleMan";
@@ -21,7 +24,7 @@ const app = express();
 app.use(helmet());
 app.use(morgan("combined"));
 
-// IMPORTANT: Apps Script sends JSON, so we must parse it
+// Apps Script sends JSON, so we must parse it
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -34,15 +37,11 @@ const mailer =
       })
     : null;
 
-// ===== In-memory store (MVP) =====
-const messages = [];
-
 // ===== Basic Auth middleware =====
 function basicAuth(req, res, next) {
   const user = process.env.INBOUND_USER || "";
   const pass = process.env.INBOUND_PASS || "";
 
-  // If you forgot to set these, fail loudly
   if (!user || !pass) {
     return res.status(500).json({
       ok: false,
@@ -71,13 +70,11 @@ function basicAuth(req, res, next) {
 function extractEmail(str = "") {
   const m = str.match(/<([^>]+)>/);
   if (m && m[1]) return m[1].trim();
-  // fallback: first email-like token
   const m2 = str.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return m2 ? m2[0] : str.trim();
 }
 
 function normalizeParsed(parsed) {
-  // Ensure the object always has the fields your app expects
   const safe = {
     summary: typeof parsed?.summary === "string" ? parsed.summary : "",
     responseNeeded: !!parsed?.responseNeeded,
@@ -91,7 +88,7 @@ function normalizeParsed(parsed) {
     flags: Array.isArray(parsed?.flags) ? parsed.flags : []
   };
 
-  // Optional extras if your earlier schema used these fields
+  // Optional extras (safe defaults)
   safe.requestedChanges = Array.isArray(parsed?.requestedChanges) ? parsed.requestedChanges : [];
   safe.dates = Array.isArray(parsed?.dates) ? parsed.dates : [];
   safe.times = Array.isArray(parsed?.times) ? parsed.times : [];
@@ -123,14 +120,41 @@ function buildFallbackMessage({ from, subject, text }, reasonType = "ai_unavaila
   };
 }
 
+// Helper: fetch message by id from DB (used for /reply)
+async function getMessageById(id) {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      id,
+      received_at AS "receivedAt",
+      from_raw AS "fromRaw",
+      from_email AS "fromEmail",
+      subject,
+      raw_text AS "rawText",
+      reply_options AS "replyOptions"
+    FROM messages
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [id]
+  );
+  return rows[0] || null;
+}
+
 // ===== Routes =====
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-// The app polls this
-app.get("/messages", (req, res) => {
-  res.json({ messages });
+// The app polls this (now DB-backed)
+app.get("/messages", basicAuth, async (req, res) => {
+  try {
+    const messages = await listMessages(200);
+    res.json({ messages });
+  } catch (err) {
+    console.error("❌ /messages error:", err?.stack || err);
+    res.status(500).json({ ok: false, error: "Server error" });
+  }
 });
 
 // Inbound email webhook target (Apps Script POSTs here)
@@ -145,49 +169,54 @@ app.post("/email/inbound", basicAuth, async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing text body" });
     }
 
+    const id = crypto.randomUUID();
+    const fromEmail = extractEmail(from);
+
+    // Try AI
     let parsed;
     try {
       parsed = await analyzeWithAI({ from, subject, text });
       parsed = normalizeParsed(parsed);
     } catch (aiErr) {
-      // If OpenAI fails (429 quota, etc.), we still store the message
-      const msg = {
-        id: crypto.randomUUID(),
+      // Store fallback in DB
+      const fallback = buildFallbackMessage({ from, subject, text }, "ai_error");
+
+      await insertMessage({
+        id,
         channel: "email",
         receivedAt: new Date().toISOString(),
-        from,
+        fromRaw: from,
+        fromEmail,
         subject,
         rawText: text,
-        ...buildFallbackMessage({ from, subject, text }, "ai_error")
-      };
-      messages.unshift(msg);
+        ...fallback
+      });
 
       console.error("❌ AI error (stored fallback):", aiErr?.stack || aiErr);
-
-      // 202 Accepted = received and stored, but processing incomplete
-      return res.status(202).json({ ok: true, warning: "AI unavailable, stored fallback" });
+      return res.status(202).json({ ok: true, id, warning: "AI unavailable, stored fallback" });
     }
 
-    const msg = {
-      id: crypto.randomUUID(),
+    // Store real parsed message in DB
+    await insertMessage({
+      id,
       channel: "email",
       receivedAt: new Date().toISOString(),
-      from,
+      fromRaw: from,
+      fromEmail,
       subject,
       rawText: text,
       ...parsed
-    };
+    });
 
-    messages.unshift(msg);
-    return res.json({ ok: true });
+    return res.json({ ok: true, id });
   } catch (err) {
     console.error("❌ /email/inbound error:", err?.stack || err);
     return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// Nodemailer
-app.post("/reply", basicAuth, express.json(), async (req, res) => {
+// Reply endpoint (DB-backed)
+app.post("/reply", basicAuth, async (req, res) => {
   try {
     if (!mailer) {
       return res.status(500).json({ ok: false, error: "Email not configured" });
@@ -198,12 +227,12 @@ app.post("/reply", basicAuth, express.json(), async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing messageId or body" });
     }
 
-    const msg = messages.find(m => m.id === messageId); // adapt if your storage differs
+    const msg = await getMessageById(messageId);
     if (!msg) {
       return res.status(404).json({ ok: false, error: "Message not found" });
     }
 
-    const to = msg.fromEmail || extractEmail(msg.fromRaw || msg.from || "");
+    const to = msg.fromEmail || extractEmail(msg.fromRaw || "");
     if (!to || !ALLOWED_RECIPIENTS.has(to)) {
       return res.status(403).json({ ok: false, error: "Recipient not allowed" });
     }
@@ -219,14 +248,23 @@ app.post("/reply", basicAuth, express.json(), async (req, res) => {
 
     return res.json({ ok: true });
   } catch (err) {
-    console.error("❌ /reply error:", err);
+    console.error("❌ /reply error:", err?.stack || err);
     return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-
 // ===== Start =====
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+
+  // DB init logs you can look for
+  console.log("DATABASE_URL present?", !!process.env.DATABASE_URL);
+  try {
+    console.log("⏳ initializing DB...");
+    await initDb();
+    console.log("✅ DB initialized");
+  } catch (err) {
+    console.error("❌ DB init failed:", err?.stack || err);
+  }
 });
