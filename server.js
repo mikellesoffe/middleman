@@ -2,7 +2,8 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 import crypto from "crypto";
-import nodemailer from "nodemailer";
+
+import sgMail from "@sendgrid/mail";
 
 import { analyzeWithAI } from "./aiAnalyzer.js";
 import { pool, initDb, insertMessage, listMessages } from "./db.js";
@@ -16,9 +17,15 @@ const app = express();
 const INBOUND_USER = process.env.INBOUND_USER || "";
 const INBOUND_PASS = process.env.INBOUND_PASS || "";
 
-const GMAIL_USER = process.env.GMAIL_USER || "";
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
 const REPLY_FROM_NAME = process.env.REPLY_FROM_NAME || "MiddleMan";
+
+// ✅ SendGrid (outbound email)
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "";
+const MAIL_FROM = process.env.MAIL_FROM || ""; // set to soffe.mikelle@gmail.com
+
+if (SENDGRID_API_KEY) {
+  sgMail.setApiKey(SENDGRID_API_KEY);
+}
 
 /* =========================================================
    SECURITY
@@ -28,11 +35,10 @@ const REPLY_FROM_NAME = process.env.REPLY_FROM_NAME || "MiddleMan";
 const ALLOWED_RECIPIENTS = new Set([
   "jeremybnewman@gmail.com",
   "jklinenewman@gmail.com",
-  "mikellesoffe@gmail.com" // optional: remove if you don't want to allow sending to yourself
+  "soffe.mikelle@gmail.com" // optional: allow sending test emails to yourself
 ]);
 
 function basicAuth(req, res, next) {
-  // Fail loudly if missing env vars
   if (!INBOUND_USER || !INBOUND_PASS) {
     return res.status(500).json({
       ok: false,
@@ -64,18 +70,6 @@ function basicAuth(req, res, next) {
 app.use(helmet());
 app.use(morgan("combined"));
 app.use(express.json({ limit: "2mb" }));
-
-/* =========================================================
-   MAILER
-========================================================= */
-
-const mailer =
-  GMAIL_USER && GMAIL_APP_PASSWORD
-    ? nodemailer.createTransport({
-        service: "gmail",
-        auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD }
-      })
-    : null;
 
 /* =========================================================
    HELPERS
@@ -114,6 +108,23 @@ function buildFallbackMessage({ from, subject, text }, reasonType = "ai_unavaila
     ],
     replyOptions: { boundary: "Noted.", cooperative: "Thanks for the update." },
     flags: [{ type: reasonType, severity: 3 }]
+  };
+}
+
+async function sendEmail({ to, subject, text }) {
+  if (!SENDGRID_API_KEY) throw new Error("Missing SENDGRID_API_KEY");
+  if (!MAIL_FROM) throw new Error("Missing MAIL_FROM (set to soffe.mikelle@gmail.com)");
+
+  const msg = {
+    to,
+    from: { email: MAIL_FROM, name: REPLY_FROM_NAME },
+    subject,
+    text
+  };
+
+  const [resp] = await sgMail.send(msg);
+  return {
+    statusCode: resp?.statusCode
   };
 }
 
@@ -195,13 +206,9 @@ app.post("/email/inbound", basicAuth, async (req, res) => {
   }
 });
 
-// Reply to an existing stored message (DB-backed)
+// Reply to an existing stored message (SendGrid outbound)
 app.post("/reply", basicAuth, async (req, res) => {
   try {
-    if (!mailer) {
-      return res.status(500).json({ ok: false, error: "Email not configured" });
-    }
-
     const { messageId, body } = req.body || {};
     if (!messageId || !body) {
       return res.status(400).json({ ok: false, error: "Missing messageId or body" });
@@ -221,32 +228,21 @@ app.post("/reply", basicAuth, async (req, res) => {
 
     const subj = msg.subject ? `Re: ${msg.subject}` : "Re:";
 
-    // Respond fast to avoid timeouts (optional)
+    // respond immediately (avoid client timeouts)
     res.status(202).json({ ok: true });
 
-    // Send async
-    mailer
-      .sendMail({
-        from: `${REPLY_FROM_NAME} <${GMAIL_USER}>`,
-        to,
-        subject: subj,
-        text: String(body)
-      })
-      .then(() => console.log(`✅ Sent reply to ${to} (messageId=${messageId})`))
-      .catch(err => console.error("❌ /reply sendMail failed:", err?.stack || err));
+    sendEmail({ to, subject: subj, text: String(body) })
+      .then((info) => console.log("✅ /reply sent via SendGrid:", { to, info }))
+      .catch((err) => console.error("❌ /reply SendGrid failed:", err?.response?.body || err?.message || err));
   } catch (err) {
     console.error("❌ /reply error:", err?.stack || err);
     return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// ✅ Compose a brand-new email (THIS fixes your timeout)
+// Compose a brand-new email (SendGrid outbound)
 app.post("/compose", basicAuth, async (req, res) => {
   try {
-    if (!mailer) {
-      return res.status(500).json({ ok: false, error: "Email not configured" });
-    }
-
     const { to, subject, body } = req.body || {};
     const cleanTo = String(to || "").trim().toLowerCase();
 
@@ -258,19 +254,15 @@ app.post("/compose", basicAuth, async (req, res) => {
       return res.status(403).json({ ok: false, error: "Recipient not allowed" });
     }
 
-    // ✅ Respond immediately so the phone never times out
+    const cleanSubject = subject?.trim() ? String(subject).trim() : "(no subject)";
+    const cleanBody = String(body);
+
+    // respond immediately (avoid client timeouts)
     res.status(202).json({ ok: true });
 
-    // ✅ Send email async in the background
-    mailer
-      .sendMail({
-        from: `${REPLY_FROM_NAME} <${GMAIL_USER}>`,
-        to: cleanTo,
-        subject: subject?.trim() ? String(subject).trim() : "(no subject)",
-        text: String(body)
-      })
-      .then(() => console.log(`✅ Sent compose email to ${cleanTo}`))
-      .catch(err => console.error("❌ /compose sendMail failed:", err?.stack || err));
+    sendEmail({ to: cleanTo, subject: cleanSubject, text: cleanBody })
+      .then((info) => console.log("✅ /compose sent via SendGrid:", { to: cleanTo, info }))
+      .catch((err) => console.error("❌ /compose SendGrid failed:", err?.response?.body || err?.message || err));
   } catch (err) {
     console.error("❌ /compose error:", err?.stack || err);
     return res.status(500).json({ ok: false, error: "Server error" });
@@ -286,6 +278,8 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   console.log("DATABASE_URL present?", !!process.env.DATABASE_URL);
+  console.log("SENDGRID_API_KEY present?", !!SENDGRID_API_KEY);
+  console.log("MAIL_FROM:", MAIL_FROM || "(missing)");
 
   try {
     console.log("⏳ initializing DB...");
