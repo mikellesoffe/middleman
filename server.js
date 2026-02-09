@@ -218,6 +218,38 @@ app.post("/reply", basicAuth, async (req, res) => {
       return res.status(403).json({ ok: false });
     }
 
+   // Compose a brand-new email (not a reply)
+app.post("/compose", basicAuth, async (req, res) => {
+  try {
+    if (!mailer) {
+      return res.status(500).json({ ok: false, error: "Email not configured" });
+    }
+
+    const { to, subject, body } = req.body || {};
+
+    if (!to || !body) {
+      return res.status(400).json({ ok: false, error: "Missing to or body" });
+    }
+
+    const cleanTo = String(to).trim().toLowerCase();
+    if (!ALLOWED_RECIPIENTS.has(cleanTo)) {
+      return res.status(403).json({ ok: false, error: "Recipient not allowed" });
+    }
+
+    await mailer.sendMail({
+      from: `${REPLY_FROM_NAME} <${GMAIL_USER}>`,
+      to: cleanTo,
+      subject: subject?.trim() ? String(subject).trim() : "(no subject)",
+      text: String(body)
+    });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ /compose error:", err?.stack || err);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
+
     await mailer.sendMail({
       from: `${REPLY_FROM_NAME} <${GMAIL_USER}>`,
       to,
