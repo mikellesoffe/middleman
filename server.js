@@ -26,7 +26,9 @@ const REPLY_FROM_NAME = (process.env.REPLY_FROM_NAME || MAIL_FROM_NAME || "Mikel
 const ALLOWED_RECIPIENTS = new Set([
   "jeremybnewman@gmail.com",
   "jklinenewman@gmail.com",
-  "mikellesoffe@gmail.com" // optional for testing
+  "mikellesoffe@gmail.com",
+  "mikellenewman@gmail.com",
+  "bradvanorman@gmail.com"
 ]);
 
 if (SENDGRID_API_KEY) {
